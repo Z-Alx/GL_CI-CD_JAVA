@@ -1,0 +1,68 @@
+stages:
+ 
+  - build
+  - deploy
+  
+### BUILD SECTION
+
+maven:
+  stage: build
+  image: maven:3-jdk-11-slim
+  services:
+    - $DIND_IMAGE
+  variables:
+    MAVEN_CLI_OPTS: "--batch-mode --errors"
+    MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Djava.awt.headless=true"
+  script:
+    - echo "commit timestamp - $CI_COMMIT_TIMESTAMP"
+    - cd accounting && mvn $MAVEN_CLI_OPTS clean verify && mv target/accounting-*.jar target/accounting.jar
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .m2/repository
+  artifacts:
+    when: always
+    paths:
+      - accounting/target/accounting.jar
+    expire_in: 1h
+    reports:
+      junit: accounting/target/surefire-reports/TEST-*.xml
+ 
+### DEPLOY SECTION
+
+.helm:
+  extends: .common_docker
+  stage: deploy
+  image: $HELM_IMAGE
+  before_script:
+    - echo "${KUBE_CONFIG}" > "${KUBECONFIG}"
+    - chmod 0600 "${KUBECONFIG}"
+  script:
+    - export HELM_APPVERSION="temp-${CI_COMMIT_SHORT_SHA}"
+    - export HELM_VERSION="$(busybox date -u -D %Y-%m-%dT%H:%M:%S +%Y%m.%d%H.%M%S -d $CI_COMMIT_TIMESTAMP)"
+    - cd .chart && sh setup.sh && helm dependency update && helm lint -n default --with-subcharts . && helm upgrade --atomic --install --create-namespace --namespace ${HELM_NAMESPACE} ${HELM_RELEASE} ${HELM_PARAMETERS} .
+#
+
+# Deploy task on branch "develop".
+deploy-develop:
+  extends: .helm
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'develop' && $CI_PIPELINE_SOURCE != "merge_request_event" && $KUBE_CONFIG
+    - when: never
+  variables:
+    HELM_NAMESPACE: $HELM_NAMESPACE_DEV
+    HELM_INGRESS_HOST: $HELM_INGRESS_HOST_DEV
+    HELM_KEYCLOAK_EXTERNAL_HOST: $HELM_KEYCLOAK_EXTERNAL_HOST_DEV
+    KUBE_CONFIG: $KUBE_CONFIG
+
+# Deploy task on branch "master".
+deploy-staging:
+  extends: .helm
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'master' && $CI_PIPELINE_SOURCE != "merge_request_event" && $KUBE_CONFIG
+    - when: never
+  variables:
+    HELM_NAMESPACE: $HELM_NAMESPACE_STG
+    HELM_INGRESS_HOST: $HELM_INGRESS_HOST_STG
+    HELM_KEYCLOAK_EXTERNAL_HOST: $HELM_KEYCLOAK_EXTERNAL_HOST_STG
+    KUBE_CONFIG: $KUBE_CONFIG
